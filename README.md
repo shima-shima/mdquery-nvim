@@ -30,7 +30,7 @@ vim.opt.runtimepath:append("~/mdquery-nvim")
 require("mdquery").setup({})
 ```
 
-## 使い方 due:2026-06-23
+## 使い方
 
 1. Markdown ファイルを開く
 2. `:MdQuery` を実行 → 入力フロートが開く
