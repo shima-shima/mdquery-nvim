@@ -30,6 +30,8 @@ local function reset_state()
     row_to_line = {}, -- result display row (1-based) -> source line
     query = "",
     debounce_timer = nil,
+    src_debounce_timer = nil,
+    autocmd_group = nil,
   }
 end
 
@@ -157,6 +159,15 @@ local function close_all()
     S.debounce_timer:close()
     S.debounce_timer = nil
   end
+  if S.src_debounce_timer then
+    S.src_debounce_timer:stop()
+    S.src_debounce_timer:close()
+    S.src_debounce_timer = nil
+  end
+  if S.autocmd_group then
+    pcall(vim.api.nvim_del_augroup_by_id, S.autocmd_group)
+    S.autocmd_group = nil
+  end
   if is_valid_win(S.prompt_win) then
     vim.api.nvim_win_close(S.prompt_win, true)
   end
@@ -187,6 +198,23 @@ local function schedule_update()
   end))
 end
 
+-- Debounced incremental update from the source buffer changes.
+local function schedule_src_update()
+  if not S then return end
+  if S.src_debounce_timer then
+    S.src_debounce_timer:stop()
+  else
+    S.src_debounce_timer = vim.loop.new_timer()
+  end
+  local delay = config.options.debounce_ms
+  S.src_debounce_timer:start(delay, 0, vim.schedule_wrap(function()
+    if not (S and vim.api.nvim_buf_is_valid(S.src_buf)) then return end
+    local lines = vim.api.nvim_buf_get_lines(S.src_buf, 0, -1, false)
+    S.items = parser.parse(lines)
+    render()
+  end))
+end
+
 local function create_result_split()
   vim.cmd("botright vsplit")
   S.res_win = vim.api.nvim_get_current_win()
@@ -209,6 +237,15 @@ local function create_result_split()
   vim.keymap.set("n", "<CR>", jump, opts)
   vim.keymap.set("n", "q", close_all, opts)
   vim.keymap.set("n", "i", function() M.focus_prompt() end, opts)
+
+  -- Cleanup automatically when the result buffer window is wiped
+  vim.api.nvim_create_autocmd("BufWipeout", {
+    buffer = S.res_buf,
+    once = true,
+    callback = function()
+      close_all()
+    end,
+  })
 end
 
 local function create_prompt()
@@ -303,6 +340,15 @@ function M.open(initial_query)
   S.query = initial_query or ""
 
   create_result_split()
+
+  -- Watch source buffer for text changes
+  S.autocmd_group = vim.api.nvim_create_augroup("MdQueryLiveSync", { clear = true })
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "InsertLeave" }, {
+    group = S.autocmd_group,
+    buffer = S.src_buf,
+    callback = schedule_src_update,
+  })
+
   -- Return focus to source before opening the prompt so prompt anchors over editor.
   render()
   create_prompt()
