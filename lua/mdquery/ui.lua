@@ -13,6 +13,7 @@ local filter = require("mdquery.filter")
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("mdquery")
+vim.api.nvim_set_hl(0, "MdQueryAncestor", { link = "LineNr", default = true })
 
 -- Active session state.
 local S = nil
@@ -45,8 +46,9 @@ local function render()
 
   local lines = {}
   S.row_to_line = {}
+  local ancestor_rows = {}
 
-  -- Header (2 lines).
+  -- Header (3 lines).
   local q = S.query ~= "" and S.query or "(all)"
   table.insert(lines, "query " .. q)
   table.insert(lines, string.format("matched %d / %d", mcount, total))
@@ -54,25 +56,53 @@ local function render()
 
   local header_rows = #lines
 
-  for _, item in ipairs(matched) do
-    local parts = {}
-    -- checkbox
-    if item.checked == true then
-      table.insert(parts, "[x]")
-    elseif item.checked == false then
-      table.insert(parts, "[ ]")
+  -- Recursive render helper for UI tree.
+  local function render_tree(tree_items, level)
+    for _, item in ipairs(tree_items) do
+      local parts = {}
+      local indent_prefix = string.rep("  ", level)
+
+      -- checkbox
+      if item.checked == true then
+        table.insert(parts, "[x]")
+      elseif item.checked == false then
+        table.insert(parts, "[ ]")
+      end
+
+      -- Display text
+      local item_text = item.text ~= "" and item.text or "(empty)"
+      table.insert(parts, item_text)
+
+      for _, t in ipairs(item.tags) do
+        table.insert(parts, "#" .. t)
+      end
+      for k, v in pairs(item.meta) do
+        table.insert(parts, "@" .. k .. ":" .. v)
+      end
+
+      local display_text = table.concat(parts, " ")
+      if item.type == "heading" then
+        local hashes = string.rep("#", item.heading_level)
+        display_text = hashes .. " " .. display_text
+      end
+
+      local row_text = indent_prefix .. display_text .. "  :" .. item.line
+      table.insert(lines, row_text)
+
+      local current_row = #lines
+      S.row_to_line[current_row] = item.line
+
+      if item.is_ancestor then
+        table.insert(ancestor_rows, current_row)
+      end
+
+      if item.children then
+        render_tree(item.children, level + 1)
+      end
     end
-    table.insert(parts, item.text ~= "" and item.text or "(empty)")
-    for _, t in ipairs(item.tags) do
-      table.insert(parts, "#" .. t)
-    end
-    for k, v in pairs(item.meta) do
-      table.insert(parts, "@" .. k .. ":" .. v)
-    end
-    local row_text = table.concat(parts, "  ") .. "  :" .. item.line
-    table.insert(lines, row_text)
-    S.row_to_line[#lines] = item.line
   end
+
+  render_tree(matched, 0)
 
   if mcount == 0 then
     table.insert(lines, "")
@@ -87,6 +117,11 @@ local function render()
   vim.api.nvim_buf_clear_namespace(S.res_buf, ns, 0, -1)
   for i = 0, header_rows - 1 do
     vim.api.nvim_buf_add_highlight(S.res_buf, ns, "Title", i, 0, -1)
+  end
+
+  -- Highlight ancestor rows (MdQueryAncestor group).
+  for _, row_idx in ipairs(ancestor_rows) do
+    vim.api.nvim_buf_add_highlight(S.res_buf, ns, "MdQueryAncestor", row_idx - 1, 0, -1)
   end
 
   S.first_data_row = header_rows + 1
@@ -203,21 +238,6 @@ local function create_prompt()
     callback = schedule_update,
   })
 
-  -- Enter confirms (and moves focus to the results).
-  vim.fn.prompt_setcallback(S.prompt_buf, function(text)
-    -- strip prompt prefix if present
-    local prefix = vim.fn.prompt_getprompt(S.prompt_buf)
-    if prefix ~= "" and text:sub(1, #prefix) == prefix then
-      text = text:sub(#prefix + 1)
-    end
-    S.query = text
-    render()
-    if is_valid_win(S.res_win) then
-      vim.api.nvim_set_current_win(S.res_win)
-      cursor_to_first_result()
-    end
-  end)
-
   -- Esc (insert or normal) closes the prompt only, keeping the results,
   -- and moves focus to the result window.
   local function close_prompt()
@@ -231,6 +251,19 @@ local function create_prompt()
       cursor_to_first_result()
     end
   end
+
+  -- Enter confirms, closes the prompt, and moves focus to the results.
+  vim.fn.prompt_setcallback(S.prompt_buf, function(text)
+    -- strip prompt prefix if present
+    local prefix = vim.fn.prompt_getprompt(S.prompt_buf)
+    if prefix ~= "" and text:sub(1, #prefix) == prefix then
+      text = text:sub(#prefix + 1)
+    end
+    S.query = text
+    render()
+    close_prompt()
+  end)
+
   local opts = { buffer = S.prompt_buf, nowait = true, silent = true }
   vim.keymap.set({ "n", "i" }, "<Esc>", close_prompt, opts)
 

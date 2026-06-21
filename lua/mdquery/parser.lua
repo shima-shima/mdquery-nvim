@@ -19,13 +19,33 @@ local URL_SCHEMES = {
 }
 
 -- Returns content after the list marker, or nil if the line is not a list item.
-local function strip_list_marker(line)
+-- Parses list marker and returns indent size and content after marker.
+-- Returns nil if it's not a list item.
+local function parse_list_item(line)
   -- bullets: -, *, +
-  local rest = line:match("^%s*[%-%*%+]%s+(.*)$")
-  if rest then return rest end
+  local indent, rest = line:match("^(%s*)[%-%*%+]%s+(.*)$")
+  if indent then
+    return #indent, rest
+  end
   -- ordered: 1. / 1)
-  rest = line:match("^%s*%d+[%.%)]%s+(.*)$")
-  return rest
+  indent, rest = line:match("^(%s*)%d+[%.%)]%s+(.*)$")
+  if indent then
+    return #indent, rest
+  end
+  return nil
+end
+
+-- Parses heading and returns heading level (depth) and content.
+-- Returns nil if it's not a heading of level 2-4.
+local function parse_heading(line)
+  local hashes, rest = line:match("^%s*(#+)%s+(.*)$")
+  if hashes then
+    local depth = #hashes
+    if depth >= 2 and depth <= 4 then
+      return depth, rest
+    end
+  end
+  return nil
 end
 
 -- Extracts checkbox state. Returns checked(bool|nil), text-without-checkbox.
@@ -75,24 +95,98 @@ local function extract_metadata(text)
 end
 
 -- Parse an array of lines (1-based line numbers).
+-- Builds a nested tree structure based on heading levels and list item indentation.
 function M.parse(lines)
-  local items = {}
+  local root_items = {}
+  local stack = {}
+
   for i, line in ipairs(lines) do
-    local content = strip_list_marker(line)
-    if content then
-      local checked, rest = extract_checkbox(content)
+    local item = nil
+
+    -- 1. Try list item
+    local indent, list_content = parse_list_item(line)
+    if list_content then
+      local checked, rest = extract_checkbox(list_content)
       local tags, meta, clean = extract_metadata(rest)
-      table.insert(items, {
+      item = {
+        type = "list",
         text = clean,
         raw = line,
         tags = tags,
         meta = meta,
         checked = checked,
         line = i,
-      })
+        indent = indent,
+        children = {},
+      }
+    else
+      -- 2. Try heading
+      local depth, heading_content = parse_heading(line)
+      if heading_content then
+        local tags, meta, clean = extract_metadata(heading_content)
+        item = {
+          type = "heading",
+          text = clean,
+          raw = line,
+          tags = tags,
+          meta = meta,
+          checked = nil,
+          line = i,
+          heading_level = depth,
+          children = {},
+        }
+      end
+    end
+
+    if item then
+      if item.type == "heading" then
+        -- Pop stack while top is list OR (top is heading and top.heading_level >= item.heading_level)
+        while #stack > 0 do
+          local top = stack[#stack]
+          if top.type == "list" or (top.type == "heading" and top.heading_level >= item.heading_level) then
+            table.remove(stack)
+          else
+            break
+          end
+        end
+      elseif item.type == "list" then
+        -- Pop stack while top is list and top.indent >= item.indent
+        while #stack > 0 do
+          local top = stack[#stack]
+          if top.type == "list" and top.indent >= item.indent then
+            table.remove(stack)
+          else
+            break
+          end
+        end
+      end
+
+      -- Link to parent
+      if #stack > 0 then
+        local parent = stack[#stack]
+        table.insert(parent.children, item)
+      else
+        table.insert(root_items, item)
+      end
+
+      -- Push to stack
+      table.insert(stack, item)
     end
   end
-  return items
+
+  -- Clean up empty children tables to keep it neat
+  local function prune(items)
+    for _, it in ipairs(items) do
+      if #it.children == 0 then
+        it.children = nil
+      else
+        prune(it.children)
+      end
+    end
+  end
+  prune(root_items)
+
+  return root_items
 end
 
 return M
